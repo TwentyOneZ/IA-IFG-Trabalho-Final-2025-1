@@ -7,6 +7,7 @@ import subprocess
 import seaborn as sns
 import scipy.stats as stats
 import subprocess, sys
+import glob
 
 from scripts.data_load import load_crypto_data
 from scripts.features import create_features
@@ -82,25 +83,35 @@ def analyze(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Argumentos passados pela CLI.
     """
-    symbol = args.crypto.upper()
-    filepath = f"Dados/Dia/Poloniex_{symbol}USDT_d.csv"
 
-    if not os.path.exists(filepath):
-        print(f"Arquivo não encontrado: {filepath}")
-        return
+    cryptos = [args.crypto.upper()]
+    if args.crypto.upper() == "ALL":
+        paths = glob.glob("Dados/Dia/Poloniex_*USDT_d.csv")
+        cryptos = [
+            os.path.basename(p).split("_")[1].replace("USDT", "")
+            for p in paths
+        ]
 
-    df = load_crypto_data(filepath)
-    close = df["Close"]
-    logging.info(f"Média: {close.mean():.2f}")
-    logging.info(f"Mediana: {close.median():.2f}")
-    logging.info(f"Moda: {close.mode().iloc[0]:.2f}")
-    logging.info(f"Variância: {close.var():.2f}")
-    logging.info(f"Desvio padrão: {close.std():.2f}")
-    logging.info(f"1º quartil (q1): {np.percentile(close, 25):.2f}")
-    logging.info(f"3º quartil (q3): {np.percentile(close, 75):.2f}")
-    logging.info(f"Mínimo: {close.min():.2f}")
-    logging.info(f"Máximo: {close.max():.2f}")
-    gerar_graficos(df, symbol, args.show, args.save)
+    for symbol in cryptos:
+        filepath = f"Dados/Dia/Poloniex_{symbol}USDT_d.csv"
+        if not os.path.exists(filepath):
+            logging.warning(f"Arquivo não encontrado: {filepath}")
+            continue
+
+        df = load_crypto_data(filepath)
+        close = df["Close"]
+        logging.info(f"======== {symbol} ======== ")
+        logging.info(f"Média: {close.mean():.2f}")
+        logging.info(f"Mediana: {close.median():.2f}")
+        logging.info(f"Moda: {close.mode().iloc[0]:.2f}")
+        logging.info(f"Variância: {close.var():.2f}")
+        logging.info(f"Desvio padrão: {close.std():.2f}")
+        logging.info(f"1º quartil (q1): {np.percentile(close, 25):.2f}")
+        logging.info(f"3º quartil (q3): {np.percentile(close, 75):.2f}")
+        logging.info(f"Mínimo: {close.min():.2f}")
+        logging.info(f"Máximo: {close.max():.2f}")
+        gerar_graficos(df, symbol, args.show, args.save)
+
 
 # ==== SIMULATE ====
 
@@ -111,66 +122,72 @@ def simulate(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Argumentos da linha de comando contendo crypto, model, start_date e save.
     """
-    symbol = args.crypto.upper()
+    symbols = [args.crypto.upper()]
     model_name = args.model
-    filepath = os.path.join("Dados", "Dia", f"Poloniex_{symbol}USDT_d.csv")
+    if args.crypto.upper() == "ALL":
+        symbols = [
+            os.path.basename(p).split("_")[1].replace("USDT", "")
+            for p in glob.glob("Dados/Dia/Poloniex_*USDT_d.csv")
+        ]
 
-    if not os.path.exists(filepath):
-        print(f"Arquivo não encontrado: {filepath}")
-        return
+    for symbol in symbols:
+        filepath = os.path.join("Dados", "Dia", f"Poloniex_{symbol}USDT_d.csv")
+        if not os.path.exists(filepath):
+            logging.warning(f"Arquivo não encontrado: {filepath}")
+            continue
 
-    df = load_crypto_data(filepath)
-    df = create_features(df)
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(inplace=True)
+        df = load_crypto_data(filepath)
+        df = create_features(df)
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(inplace=True)
 
-    if args.start_date:
-        try:
-            df = df[df["Date"] >= pd.to_datetime(args.start_date)]
-        except Exception as e:
-            print(f"Data inválida: {args.start_date}. Use o formato YYYY-MM-DD.")
+        if args.start_date:
+            try:
+                df = df[df["Date"] >= pd.to_datetime(args.start_date)]
+            except Exception as e:
+                print(f"Data inválida: {args.start_date}. Use o formato YYYY-MM-DD.")
+                return
+
+        X = df[["pct_change_1d", "volume_change_1d", "ma_3", "ma_7", "ma_14", "std_7", "std_14"]].values
+        y = df["target"].values
+
+        models = get_models(degree_list=[2, 3, 5])
+        if model_name not in models:
+            print(f"Modelo '{model_name}' não encontrado.")
             return
 
-    X = df[["pct_change_1d", "volume_change_1d", "ma_3", "ma_7", "ma_14", "std_7", "std_14"]].values
-    y = df["target"].values
+        model = models[model_name]
+        if isinstance(model, tuple) and model[0] == "poly":
+            poly = model[1]
+            X = poly.fit_transform(X)
+            model = model[2]
 
-    models = get_models(degree_list=[2, 3, 5])
-    if model_name not in models:
-        print(f"Modelo '{model_name}' não encontrado.")
-        return
+        model.fit(X, y)
+        df["target"] = model.predict(X)
+        resultado = simular_lucro_vetorizado(df)
 
-    model = models[model_name]
-    if isinstance(model, tuple) and model[0] == "poly":
-        poly = model[1]
-        X = poly.fit_transform(X)
-        model = model[2]
+        os.makedirs("figures/lucro", exist_ok=True)
+        sufixo_data = f"_desde_{args.start_date}" if args.start_date else ""
+        base_nome = f"lucro_{symbol}_{model_name}{sufixo_data}"
 
-    model.fit(X, y)
-    df["target"] = model.predict(X)
-    resultado = simular_lucro_vetorizado(df)
+        plt.figure(figsize=(12, 5))
+        plt.plot(resultado["Data"], resultado["capital_estrategia"], label="Modelo (estratégia ativa)")
+        plt.plot(resultado["Data"], resultado["capital_hold"], label="Buy and Hold", linestyle="--")
+        plt.title(f"Simulação de Lucro — {symbol} com {model_name}")
+        plt.xlabel("Data")
+        plt.ylabel("Capital acumulado (USD)")
+        plt.grid(True)
+        plt.legend()
 
-    os.makedirs("figures/lucro", exist_ok=True)
-    sufixo_data = f"_desde_{args.start_date}" if args.start_date else ""
-    base_nome = f"lucro_{symbol}_{model_name}{sufixo_data}"
+        if args.save:
+            plt.savefig(f"figures/lucro/{base_nome}.png", dpi=150)
+            print(f"📈 Gráfico salvo em figures/lucro/{base_nome}.png")
+        else:
+            plt.show()
 
-    plt.figure(figsize=(12, 5))
-    plt.plot(resultado["Data"], resultado["capital_estrategia"], label="Modelo (estratégia ativa)")
-    plt.plot(resultado["Data"], resultado["capital_hold"], label="Buy and Hold", linestyle="--")
-    plt.title(f"Simulação de Lucro — {symbol} com {model_name}")
-    plt.xlabel("Data")
-    plt.ylabel("Capital acumulado (USD)")
-    plt.grid(True)
-    plt.legend()
-
-    if args.save:
-        plt.savefig(f"figures/lucro/{base_nome}.png", dpi=150)
-        print(f"📈 Gráfico salvo em figures/lucro/{base_nome}.png")
-    else:
-        plt.show()
-
-    if args.save:
-        resultado.to_csv(f"figures/lucro/{base_nome}.csv", index=False)
-        print(f"📄 Planilha salva em figures/lucro/{base_nome}.csv")
+        if args.save:
+            resultado.to_csv(f"figures/lucro/{base_nome}.csv", index=False)
+            print(f"📄 Planilha salva em figures/lucro/{base_nome}.csv")
 
 # ==== TRAIN ====
 
@@ -181,35 +198,41 @@ def train(args: argparse.Namespace) -> None:
     Args:
         args (argparse.Namespace): Argumentos da CLI contendo símbolo da criptomoeda e número de folds.
     """
-    symbol = args.crypto.upper()
-    filepath = os.path.join("Dados", "Dia", f"Poloniex_{symbol}USDT_d.csv")
+    symbols = [args.crypto.upper()]
+    if args.crypto.upper() == "ALL":
+        symbols = [
+            os.path.basename(p).split("_")[1].replace("USDT", "")
+            for p in glob.glob("Dados/Dia/Poloniex_*USDT_d.csv")
+        ]
 
-    if not os.path.exists(filepath):
-        print(f"Arquivo não encontrado: {filepath}")
-        return
+    for symbol in symbols:
+        filepath = os.path.join("Dados", "Dia", f"Poloniex_{symbol}USDT_d.csv")
+        if not os.path.exists(filepath):
+            logging.warning(f"Arquivo não encontrado: {filepath}")
+            continue
 
-    df = load_crypto_data(filepath)
-    df = create_features(df)
-    df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(inplace=True)
+        df = load_crypto_data(filepath)
+        df = create_features(df)
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(inplace=True)
 
-    X = df[["pct_change_1d", "volume_change_1d", "ma_3", "ma_7", "ma_14", "std_7", "std_14"]].values
-    y = df["target"].values
+        X = df[["pct_change_1d", "volume_change_1d", "ma_3", "ma_7", "ma_14", "std_7", "std_14"]].values
+        y = df["target"].values
 
-    print(f"\n🚀 Treinando modelos com validação K-Fold (k={args.kfolds})...")
-    models = get_models(degree_list=[2, 3, 5])
+        print(f"\n🚀 Treinando modelos com validação K-Fold (k={args.kfolds})...")
+        models = get_models(degree_list=[2, 3, 5])
 
-    for name, m in models.items():
-        if isinstance(m, tuple) and m[0] == "poly":
-            poly = m[1]
-            X_poly = poly.fit_transform(X)
-            result = train_model_cv(X_poly, y, m[2], k=args.kfolds)
-        else:
-            result = train_model_cv(X, y, m, k=args.kfolds)
+        for name, m in models.items():
+            if isinstance(m, tuple) and m[0] == "poly":
+                poly = m[1]
+                X_poly = poly.fit_transform(X)
+                result = train_model_cv(X_poly, y, m[2], k=args.kfolds)
+            else:
+                result = train_model_cv(X, y, m, k=args.kfolds)
 
-        print(f"\n📌 Modelo: {name}")
-        print(f"RMSE médio: {result['rmse_mean']:.2f} ± {result['rmse_std']:.2f}")
-        print(f"MAE  médio: {result['mae_mean']:.2f} ± {result['mae_std']:.2f}")
+            print(f"\n📌 Modelo: {name}")
+            print(f"RMSE médio: {result['rmse_mean']:.2f} ± {result['rmse_std']:.2f}")
+            print(f"MAE  médio: {result['mae_mean']:.2f} ± {result['mae_std']:.2f}")
 
 
 # ==== MAIN ====
@@ -243,6 +266,7 @@ def main() -> None:
     # compare
     compare_parser = subparsers.add_parser("compare", help="Compara todos os modelos com treino até 01/01/2024 e teste a partir do dia seguinte até a última amostra. Gera gráficos/textos.")
     compare_parser.add_argument("--crypto", required=True, help="Símbolo da criptomoeda (ex: BTC)")
+    compare_parser.add_argument("--start-date", type=str, help="Data inicial da simulação (YYYY-MM-DD)")
 
     # hypothesis
     hypothesis_parser = subparsers.add_parser(
@@ -316,10 +340,17 @@ def main() -> None:
     elif args.command == "train":
         train(args)
     elif args.command == "compare":
-        subprocess.run([
-            sys.executable, "-m", "scripts.compare_models",
-            "--crypto", args.crypto
-        ], check=True)
+        cryptos = [args.crypto.upper()]
+        if args.crypto.upper() == "ALL":
+            cryptos = [
+                os.path.basename(p).split("_")[1].replace("USDT", "")
+                for p in glob.glob("Dados/Dia/Poloniex_*USDT_d.csv")
+            ]
+        for symbol in cryptos:
+            subprocess.run([
+                sys.executable, "-m", "scripts.compare_models",
+                "--crypto", symbol
+            ], check=True)
     elif args.command == "hypothesis":
         cmd = [
             sys.executable, "-m", "scripts.test_hypothesis",
